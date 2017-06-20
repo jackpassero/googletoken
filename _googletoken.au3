@@ -16,7 +16,7 @@
 ; Requires ......: Require Ward jsmn.au3 udf see https://github.com/inververs/jsmn
 ; Requires ......: Require _Crypto.au3 udf see https://github.com/inververs/crypto
 ; Date ..........: 2017/06/01
-; Version .......: 1.0.0
+; Version .......: 1.0.1
 ; ================================================================================
 
 ; #CURRENT# =====================================================================================================================
@@ -54,35 +54,32 @@ Func _googleapis_getToken($force = False, $refresh = True)
 
         Local $object = __googleapis_storage('token')
         If Not IsObj($object) Then
-            If Not $cfg('tokens.persist') Then ExitLoop SetError(2, 0, 1)
+            If Not $cfg('tokens.persist') Then ExitLoop SetError(2, @error, 1)
 
-            Local $storage = $cfg('tokens.storage')
-            If Not FileExists($storage) Then ExitLoop SetError(3, 0, 1)
+            Local $sToken = Call($cfg('tokens.storage.function'))
+            If @error Or Not $sToken Then ExitLoop SetError(3, @error, 1)
 
-            Local $hFile = FileOpen($storage, BitOR($FO_READ, $FO_UTF8_NOBOM))
-            Local $sData = FileRead($storage)
-            FileClose($hFile)
-
-            $object = __googleapis_string_decode($sData)
-            If @error Or Not IsObj($object) Then ExitLoop SetError(4, 0, 1)
-
+            $object = __googleapis_string_decode($sToken)
+            If @error Or Not IsObj($object) Then ExitLoop SetError(4, @error, 1)
             __googleapis_storage('token', $object)
         EndIf
 
-        Local $scope = __googleapis_object($object, 'scope')
-        If $scope And $scope <> _googleapis_getScope() Then ExitLoop SetError(5, 0, 1)
+        Local $sSavedScope = _googleapis_getScope()
+        Local $sTokenScope = __googleapis_object($object, 'scope')
+        If $sSavedScope <> $sTokenScope Then ExitLoop SetError(5, @error, 1)
 
         $refresh_token = __googleapis_object($object, 'refresh_token')
-        $access_token = __googleapis_object($object, 'access_token')
-        If Not $access_token Then ExitLoop SetError(6, 0, 1)
 
         Local $exp = __googleapis_object($object, 'exp')
-        If Not $access_token Then ExitLoop SetError(7, 0, 1)
+        If Not $exp Then ExitLoop SetError(6, @error, 1)
 
         Local $iat = __googleapis_datetime_timestamp(__googleapis_object($object, 'timestamp_method'))
-        If $iat >= $exp Then ExitLoop SetError(8, 0, 1)
+        If $iat >= $exp Then ExitLoop SetError(7, @error, 1)
 
-        Return SetExtended($exp - $iat, $access_token)
+        $access_token = __googleapis_object($object, 'access_token')
+        If Not $access_token Then ExitLoop SetError(8, @error, 1)
+
+        Return SetError(0, $exp - $iat, $access_token)
     Until 1
     If $refresh And $refresh_token Then
         $access_token = __googleapis_refreshToken($refresh_token)
@@ -302,25 +299,27 @@ Func __googleapis_bootstrap()
     ;debug mode enabled. False Or True. Default false
     $cfg('debug.enabled', False)
 
-    ;default timeout for access token
+    ;default expiry time for access token in seconds
     $cfg('oauth2.exp', 3600)
 
     ;Additional claims. The email address of the user for which the application is requesting delegated access.
-    ;used when configure as service account. Default empty. See https://developers.google.com/identity/protocols/OAuth2ServiceAccount
+    ;used when configure as service account. Default empty.
+    ;see https://developers.google.com/identity/protocols/OAuth2ServiceAccount
     $cfg('oauth2.sub', '')
 
-    ;Default scope. Default email profile. See _googleapis_setScope or _googleapis_addScope to specify your own scopes
+    ;Default scope. Default email profile.
+    ;see _googleapis_setScope or _googleapis_addScope to specify your own scopes
     $cfg('oauth2.default.scope', 'email profile')
 
     ;Used when configure as desktop applicaton. Timeout in ms. When Google prompts user for consent we wait this time.
-    ;Set to 0 If you want to wait indefinitely. Default 60000.
+    ;set it to 0 if you want to wait indefinitely. Default 60000.
     $cfg('oauth2.timeout', 60000)
 
-    ;Used when configure as desktop applicaton. If this function return true we stop waiting. See oauth2.timeout.
-    ;Can be any existing functions with one parameters (time in ms). Default empty.
+    ;Used when configure as desktop applicaton. If this function return true we will stop waiting. See oauth2.timeout
+    ;can be any existing function with one parameter (time in ms). Default empty.
     $cfg('oauth2.stop_callback_function', '')
 
-    ;This configure request object. See WinHttp.WinHttpRequest.5.1 documentation
+    ;Request object configuration. See WinHttp.WinHttpRequest.5.1 documentation
     $cfg('request.timeout.resolve', 2000)
     $cfg('request.timeout.connect', 30000)
     $cfg('request.timeout.send', 30000)
@@ -329,12 +328,27 @@ Func __googleapis_bootstrap()
     $cfg('request.headers.Accept-Encoding', "deflate")
     $cfg('request.headers.Accept-Language', "en,ru;q=0.8,de;q=0.6")
     $cfg('request.headers.Content-Type', "application/json; charset=UTF-8")
-    $cfg('request.options.6', False) ;auto redirect
+    $cfg('request.options.6', False) ;auto redirect (enable = true, disable = false)
 
-    ;Save tokens information into file. Can be true or false. Default true.
+    ;Save tokens information into storage. Can be true or false. Default true.
     $cfg('tokens.persist', True)
-    ;File contains tokens information. Default tokens.storage.txt
-    $cfg('tokens.storage', 'tokens.storage.txt')
+
+    ;Function name for token persistence. Function with 1 optional parameter.
+    ;If called without params, you should read and return token info as string.
+    ;If called with 1 param, you should write token info.
+    ;Can be __googleapis_filetokenpersist or __googleapis_registrytokenpersist or any existed user function.
+    ;__googleapis_filetokenpersist will save tokens into file.
+    ;__googleapis_registrytokenpersist will save tokens into registry (Default)
+    ;You can write your own function, for exmample, __my_db_tokenstorage($sToken = Default) to save token in a database
+
+    ;$cfg('tokens.storage.function', '__googleapis_filetokenpersist')
+    ;Or registry storage
+    $cfg('tokens.storage.function', '__googleapis_registrytokenpersist')
+
+    ;File contains tokens information. Default tokens.txt. Actual for __googleapis_filetokenpersist function
+    $cfg('tokens.storage.filename', 'tokens.txt')
+    ;Regedit path. Actual for __googleapis_registrytokenpersist function
+    $cfg('tokens.storage.regedit', 'HKEY_CURRENT_USER\Software\Inververs\UDF\GoogleTokens')
 
     ;Method to obtain timestamp for token validation and jwt sign.
     ;Can be server or system or ntp or auto. Default auto
@@ -356,7 +370,7 @@ EndFunc
 ; Syntax ........: __googleapis_desktopOAuth2([$client_id = Default[, $client_secret = Default[, $stop_callback_function = Default]]])
 ; Parameters ....: $client_id           -   [optional] A string value. Default get from 'oauth2.client_id'
 ;                  $client_secret       -   [optional] A string value. Default get from 'oauth2.client_secret'
-;                  $stop_callback_function- [optional] A string value. Default is no callback
+;                  $stop_callback_function- [optional] A callable value. Default is no callback
 ; Return values .: access token
 ; Author ........: inververs
 ; Modified ......:
@@ -381,23 +395,20 @@ Func __googleapis_desktopOAuth2($client_id = Default, $client_secret = Default, 
         $stop_callback_function = $cfg('oauth2.stop_callback_function')
     EndIf
 
+    If Not TCPStartup() Or @error Then
+        Return SetError(__googleapis_RuntimeException(), 1, False)
+    EndIf
+
+    Local $iMainSocket, $iPortStart = 9004, $iPortEnd = 9014
     ;get free port
-    Do
-        If Not TCPStartup() Or @error Then
-            Return SetError(__googleapis_RuntimeException(), 1, False)
-        EndIf
-        Local $iMainSocket, $iPortStart = 9004, $iPortEnd = 9014
-        For $iPort = $iPortStart To $iPortEnd
-            $iMainSocket = TCPListen('127.0.0.1', $iPort, 100)
-            If Not @error And $iMainSocket > 0 Then ExitLoop
-        Next
-        If $iMainSocket = -1 Or Not $iMainSocket Then
-            TCPShutdown()
-            Return SetError(__googleapis_RuntimeException(), 2, False)
-        EndIf
-        TCPCloseSocket($iMainSocket)
+    For $iPort = $iPortStart To $iPortEnd
+        $iMainSocket = TCPListen('127.0.0.1', $iPort, 100)
+        If Not @error And $iMainSocket > 0 Then ExitLoop
+    Next
+    If $iMainSocket = -1 Or Not $iMainSocket Then
         TCPShutdown()
-    Until 1
+        Return SetError(__googleapis_RuntimeException(), 2, False)
+    EndIf
 
     ;Step 1: Generate a code verifier and challenge
     ;skipped
@@ -408,45 +419,41 @@ Func __googleapis_desktopOAuth2($client_id = Default, $client_secret = Default, 
             '&scope=' & _googleapis_getScope() & _
             '&client_id=' & $client_id & _
             '&redirect_uri=' & 'http://127.0.0.1:' & $iPort
+    ;Open url in default browser
     Local $iPid = ShellExecute($sUrl)
-    If @error Or Not $iPid Then Return SetError(__googleapis_RuntimeException(), 3, False)
+    If @error Or Not $iPid Then
+        TCPCloseSocket($iMainSocket)
+        TCPShutdown()
+        Return SetError(__googleapis_RuntimeException(), 3, False)
+    EndIf
 
     ;Step 3: Google prompts user for consent. In this step, the user decides whether to grant your application the requested access
-    Local $vRet = False
+    Local $vRet = False, $iSocket, $iTimer = TimerInit(), $iTimeOut = $cfg('oauth2.timeout')
     Do
-        If Not TCPStartup() Or @error Then
-            Return SetError(__googleapis_RuntimeException(), 1, False)
+        Sleep(500)
+        $iSocket = TCPAccept($iMainSocket)
+        If @error Or Not $iSocket Then
+            ExitLoop SetError(1, 0, 1)
         EndIf
-
-        Local $iMainSocket = TCPListen('127.0.0.1', $iPort, 100)
-        If @error Or Not $iMainSocket Or $iMainSocket = -1 Then
-            TCPShutdown()
-            Return SetError(__googleapis_RuntimeException(), 1, False)
+        If $stop_callback_function And Call($stop_callback_function, TimerDiff($iTimer)) Then
+            ExitLoop SetError(1, @error, 1)
         EndIf
-
-        Local $iSocket, $iTimer = TimerInit(), $iTimeOut = $cfg('oauth2.timeout')
-        Do
-            Sleep(500)
-            $iSocket = TCPAccept($iMainSocket)
-            If @error Or Not $iSocket Then ExitLoop SetError(1, 0, 1)
-            If $stop_callback_function And Call($stop_callback_function, TimerDiff($iTimer)) Then
-                ExitLoop SetError(1, @error, 1)
-            EndIf
-        Until ($iTimeOut And TimerDiff($iTimer) > $iTimeOut) Or $iSocket > 0
-        If $iSocket > 0 Then
-            $vRet = TCPRecv($iSocket, 2048)
-            TCPSend($iSocket, 'HTTP/1.1 200 Ok' & @CRLF _
-                     & 'Connection: close' & @CRLF _
-                     & 'Content-Type: text/html; charset=utf-8' & @CRLF & @CRLF _
-                     & '<html><body>You may close this window</body></html>')
-        EndIf
-        If $iSocket > 0 Then TCPCloseSocket($iSocket)
-        If $iMainSocket > 0 Then TCPCloseSocket($iMainSocket)
-        TCPShutdown()
-    Until 1
-    If Not $vRet Then Return SetError(__googleapis_UnexpectedValueException(), 1, False)
-
+    Until ($iTimeOut And TimerDiff($iTimer) > $iTimeOut) Or $iSocket > 0
+    If $iSocket > 0 Then
+        $vRet = TCPRecv($iSocket, 2048)
+        TCPSend($iSocket, 'HTTP/1.1 200 Ok' & @CRLF _
+                 & 'Connection: close' & @CRLF _
+                 & 'Content-Type: text/html; charset=utf-8' & @CRLF & @CRLF _
+                 & '<html><body>You may close this window</body></html>')
+        TCPCloseSocket($iSocket)
+    EndIf
+    TCPCloseSocket($iMainSocket)
+    TCPShutdown()
+    If Not $vRet Then
+        Return SetError(__googleapis_UnexpectedValueException(), 1, False)
+    EndIf
     If $cfg('debug.enabled') Then ConsoleWrite($vRet & @CRLF)
+
     ;Step 4: Handle the OAuth 2.0 server response
     ;check error
     If StringRegExp($vRet, '(?i)/\?error=(\S+)') Then
@@ -494,28 +501,19 @@ Func __googleapis_desktopOAuth2($client_id = Default, $client_secret = Default, 
     EndIf
 
     If $cfg('tokens.persist') Then
-        Local $hFile = FileOpen($cfg('tokens.storage'), BitOR($FO_OVERWRITE, $FO_CREATEPATH, $FO_UTF8_NOBOM))
-        If @error Or $hFile = -1 Then Return SetError(__googleapis_RuntimeException(), 6, False)
-        FileWrite($hFile, __googleapis_object_encode(__googleapis_storage('token')))
-        FileClose($hFile)
+        Call($cfg('tokens.storage.function'), __googleapis_object_encode(__googleapis_storage('token')))
+        If @error Then Return SetError(@error, @extended, False)
     EndIf
 
-    Return SetExtended($expires_in, $access_token)
-;~ {
-;~  "access_token": "ya29.GltoBAtbD1H9Xvcmgd8_8Zlo10Fvan09AYkeuRKIDQe1NJd72C2XN7GhrWCI9sphvbfLzuKGUA75PPF3l-AORY3VJAHXMxiRxOvlPRw7g1HiFl_YRFr-j1BWev-u",
-;~  "token_type": "Bearer",
-;~  "expires_in": 3600,
-;~  "refresh_token": "1/2TFLOZ5LtrGeFZDwA2dWcAySmw38TBK3WxtGtjGMJQc",
-;~  "id_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImE5MDI3MjhjZjllNTQ0M2YwOGQzYzcwZmUwOTEyMjJjMWE2NjVhMWIifQ.eyJhenAiOiI4Nzg2Nzg1MjA5NjgtaGVocHZsaWNrMGZrazdmMjRmOGtiaHFubDV2ZXA2c28uYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJhdWQiOiI4Nzg2Nzg1MjA5NjgtaGVocHZsaWNrMGZrazdmMjRmOGtiaHFubDV2ZXA2c28uYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJzdWIiOiIxMDk0MDgwNjc0NTUyNzM5OTMyMDQiLCJlbWFpbCI6InZ5bmV0Lm1haWxAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImF0X2hhc2giOiJlak1RWUdJYmlxWmI2MzRSZUZzTU9BIiwiaXNzIjoiaHR0cHM6Ly9hY2NvdW50cy5nb29nbGUuY29tIiwiaWF0IjoxNDk3MzU2ODE2LCJleHAiOjE0OTczNjA0MTYsIm5hbWUiOiLQktC70LDQtNC40LzQuNGAIiwicGljdHVyZSI6Imh0dHBzOi8vbGgzLmdvb2dsZXVzZXJjb250ZW50LmNvbS8tQWVKMWExVXFvZEkvQUFBQUFBQUFBQUkvQUFBQUFBQUFBQUEvQUF5WUJGNUtDZXdCQUFKeTUwdDliYkxSQ0FmeEMyUHpYdy9zOTYtYy9waG90by5qcGciLCJnaXZlbl9uYW1lIjoi0JLQu9Cw0LTQuNC80LjRgCIsImxvY2FsZSI6InJ1In0.fQVIGWWdESMjNoYDeZ1OCqXJtz4Oi0AhBiKqQYQBNkhP5ISoqwrjwON6j6QlXSQNA9db5cmFZN4WBWPLTaEB0ft1fYyeLZJB7a5xJq49hhJl63t8rUdAJtuRuz_jVZ5Y7aWTAOvVBKtFJCbFnzl_ZJoIWRoBV_P3_X0O12kZjvngYw3lCA1LBQ0tSpvnfMC_CSr3qSB0i-EfAB4rC41h5ageBK-an2ELV5OQJB2irWMqaX_v9NTXkGMeBmDzm7tRCo3w4OzoIeN2EUzvEvxzJOTHj59puFekj8g90oCjqcyUh5uW9JovV7_YBCDG_81CjpLiX31KJdhFuipmJtoeTw"
-;~ }
+    Return SetError(0, $expires_in, $access_token)
 EndFunc
 ; #INTERNAL_USE_ONLY# ===========================================================================================================
 ; Name ..........: __googleapis_serviceOAuth2
 ; Description ...: Obtain access token.
 ; Syntax ........: __googleapis_serviceOAuth2([$client_email = Default[, $rsa_private_key = Default]])
-; Parameters ....: $client_email        - [optional] An unknown value. Default is Default.
-;                  $rsa_private_key     - [optional] An unknown value. Default is Default.
-; Return values .: None
+; Parameters ....: $client_email        - [optional] A string value. Default get from 'oauth2.client_email'.
+;                  $rsa_private_key     - [optional] A string value. Default get from 'crypto.rsakey.private'.
+; Return values .: access token
 ; Author ........: inververs
 ; Modified ......:
 ; Remarks .......:
@@ -539,34 +537,21 @@ Func __googleapis_serviceOAuth2($client_email = Default, $rsa_private_key = Defa
     Local $iat = __googleapis_datetime_timestamp($cfg('datetime.timestamp.method'))
     If Not $iat Then Return SetError(__googleapis_RuntimeException(), 3, False)
 
-    Local $aud = 'https://www.googleapis.com/oauth2/v4/token'
+    Local $sUrl = 'https://www.googleapis.com/oauth2/v4/token'
     Local $object = __googleapis_object()
     __googleapis_object($object, 'iss', $client_email)
     __googleapis_object($object, 'scope', _googleapis_getScope())
-    __googleapis_object($object, 'aud', $aud)
+    __googleapis_object($object, 'aud', $sUrl)
     __googleapis_object($object, 'exp', $iat + $cfg('oauth2.exp'))
     __googleapis_object($object, 'iat', $iat)
     If $cfg('oauth2.sub') Then __googleapis_object($object, 'sub', $cfg('oauth2.sub'))
     Local $sClaimSet = __googleapis_object_encode($object)
 
-;~     ;create Json Web Signature (JWS)
-;~     ;base64url header
-;~     Local $s64H = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9' ;'{"alg":"RS256","typ":"JWT"}'
-;~     ;base64url payload
-;~     Local $s64P = StringReplace(StringReplace(StringReplace(__Crypto_Base64Encode($sClaimSet), '+', '-'), '/', '_'), '=', '')
-;~     ;signing header.payload
-;~     Local $signature = _Crypto_Signing_SHA256RSA($s64H & '.' & $s64P, $rsa_private_key)
-;~     If @error Then Return SetError(__googleapis_RuntimeException(), 4, False)
-;~     ;base64url signature
-;~     Local $s64S = StringReplace(StringReplace(StringReplace($signature, '+', '-'), '/', '_'), '=', '')
-;~     ;create jwt base64url
-;~     Local $sJWT = $s64H & '.' & $s64P & '.' & $s64S
-;~  ConsoleWrite($sJWT & @CRLF)
     Local $sJWT = _JWT_Sign_RS256('{"alg":"RS256","typ":"JWT"}', $sClaimSet, $rsa_private_key)
     ;prepare request data
     Local $sData = 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=' & $sJWT
     Local $sHead = 'Content-Type=application/x-www-form-urlencoded'
-    Local $sResponseText = __googleapis_request('POST', $aud, $sData, $sHead)
+    Local $sResponseText = __googleapis_request('POST', $sUrl, $sData, $sHead)
     If @error Or Not $sResponseText Then
         Return SetError(__googleapis_RuntimeException(), 5, False)
     EndIf
@@ -587,24 +572,18 @@ Func __googleapis_serviceOAuth2($client_email = Default, $rsa_private_key = Defa
     __googleapis_storage('token.scope', _googleapis_getScope())
 
     If $cfg('tokens.persist') Then
-        Local $hFile = FileOpen($cfg('tokens.storage'), BitOR($FO_OVERWRITE, $FO_CREATEPATH, $FO_UTF8_NOBOM))
-        If @error Or $hFile = -1 Then Return SetError(__googleapis_RuntimeException(), 6, False)
-        FileWrite($hFile, __googleapis_object_encode(__googleapis_storage('token')))
-        FileClose($hFile)
+        Call($cfg('tokens.storage.function'), __googleapis_object_encode(__googleapis_storage('token')))
+        If @error Then Return SetError(@error, @extended, False)
     EndIf
-    Return SetExtended($expires_in, $access_token)
-;~ {
-;~  "access_token": "ya29.ElpjBCnVnGyx2Hi9GSQ8eP1dhfvV7-Umj4uwQOgnjNwR_xxK1_zRwuSbuoaYo6W5lFXTDSYBNbOfyte-pi7TWu6C94YHw-z06Ld8hhVSDjxjPHLGR51QAwmNiMY",
-;~  "token_type": "Bearer",
-;~  "expires_in": 3600
-;~ }
+
+    Return SetError(0, $expires_in, $access_token)
 EndFunc
 ; #INTERNAL_USE_ONLY# ===========================================================================================================
 ; Name ..........: __googleapis_refreshToken
 ; Description ...: refresh access token
 ; Syntax ........: __googleapis_refreshToken($refresh_token)
 ; Parameters ....: $refresh_token    refresh token   - A string value.
-; Return values .: None
+; Return values .: access token
 ; Author ........: inververs
 ; Modified ......:
 ; Remarks .......:
@@ -648,18 +627,11 @@ Func __googleapis_refreshToken($refresh_token)
     EndIf
 
     If $cfg('tokens.persist') Then
-        Local $hFile = FileOpen($cfg('tokens.storage'), BitOR($FO_OVERWRITE, $FO_CREATEPATH, $FO_UTF8_NOBOM))
-        If @error Or $hFile = -1 Then Return SetError(__googleapis_RuntimeException(), 6, False)
-        FileWrite($hFile, __googleapis_object_encode(__googleapis_storage('token')))
-        FileClose($hFile)
+        Call($cfg('tokens.storage.function'), __googleapis_object_encode(__googleapis_storage('token')))
+        If @error Then Return SetError(@error, @extended, False)
     EndIf
 
-    Return SetExtended($expires_in, $access_token)
-;~ {
-;~   "access_token":"1/fFAGRNJru1FTz70BzhT3Zg",
-;~   "expires_in":3920,
-;~   "token_type":"Bearer"
-;~ }
+    Return SetError(0, $expires_in, $access_token)
 EndFunc
 ; #INTERNAL_USE_ONLY# ===========================================================================================================
 ; Name ..........: __googleapis_config
@@ -1057,8 +1029,72 @@ Func __googleapis_request($sMethod = 'GET', $sUrl = '', $vData = '', $sHeaders =
         Next
     EndIf
     $oHttp.Send($vData)
-    If $asObject Then Return SetError(@error, 0, $oHttp)
+    If $asObject Then Return SetError(@error, $oHttp.Status, $oHttp)
     Return SetError(@error, $oHttp.Status, $oHttp.ResponseText)
+EndFunc
+; #INTERNAL_USE_ONLY# ===========================================================================================================
+; Name ..........: __googleapis_filetokenpersist
+; Description ...: save or read token to file. Call with 1 param to save, and 0 to read
+; Syntax ........: __googleapis_filetokenpersist([$sToken = Default])
+; Parameters ....: $sToken   token - [optional] A string value. Default read operation.
+; Return values .: access token on read, none on write.
+; Author ........: inververs
+; Modified ......:
+; Remarks .......: set filename in config tokens.storage.filename. Setup in tokens.storage.function
+; Related .......: __googleapis_registrytokenpersist
+; Link ..........:
+; Example .......: No
+; ===============================================================================================================================
+Func __googleapis_filetokenpersist($sToken = Default)
+    Local $read = @NumParams = 0
+    Local $sFile = __googleapis_config('tokens.storage.filename')
+    If $read Then
+        If Not FileExists($sFile) Then
+            Return SetError(__googleapis_RuntimeException(), 1, False)
+        EndIf
+        Local $hFile = FileOpen($sFile, BitOR($FO_READ, $FO_UTF8_NOBOM))
+        If @error Or $hFile = -1 Then
+            Return SetError(__googleapis_RuntimeException(), 2, False)
+        EndIf
+        Local $sData = FileRead($sFile)
+        FileClose($hFile)
+        Return $sData
+    Else
+        Local $hFile = FileOpen($sFile, BitOR($FO_OVERWRITE, $FO_CREATEPATH, $FO_UTF8_NOBOM))
+        If @error Or $hFile = -1 Then
+            Return SetError(__googleapis_RuntimeException(), 3, False)
+        EndIf
+        FileWrite($hFile, $sToken)
+        FileClose($hFile)
+    EndIf
+EndFunc
+; #INTERNAL_USE_ONLY# ===========================================================================================================
+; Name ..........: __googleapis_registrytokenpersist
+; Description ...: save or read token to registry. Call with 1 param to save, and 0 to read
+; Syntax ........: __googleapis_registrytokenpersist([$sToken = Default])
+; Parameters ....: $sToken              - [optional] A string value. Default is Default.
+; Return values .: access token on read, none on write.
+; Author ........: inververs
+; Modified ......:
+; Remarks .......: set path in tokens.storage.regedit config. Setup in tokens.storage.function
+; Related .......: __googleapis_filetokenpersist
+; Link ..........:
+; Example .......: No
+; ===============================================================================================================================
+Func __googleapis_registrytokenpersist($sToken = Default)
+    Local $read = @NumParams = 0
+    Local $sPath = __googleapis_config('tokens.storage.regedit')
+    If $read Then
+        Local $sData = RegRead($sPath, 'token')
+        If @error Or Not $sData Then
+            Return SetError(__googleapis_RuntimeException(), 1, False)
+        EndIf
+        Return $sData
+    Else
+        If Not RegWrite($sPath, 'token', 'REG_MULTI_SZ', $sToken) Or @error Then
+            Return SetError(__googleapis_RuntimeException(), 2, False)
+        EndIf
+    EndIf
 EndFunc
 ; #INTERNAL_USE_ONLY# ===========================================================================================================
 ; Name ..........: __googleapis_InvalidArgumentException
