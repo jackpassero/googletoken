@@ -74,7 +74,7 @@ Func _googleapis_getToken($force = False, $refresh = True)
         If Not $exp Then ExitLoop SetError(6, @error, 1)
 
         Local $iat = __googleapis_datetime_timestamp(__googleapis_object($object, 'timestamp_method'))
-        If $iat >= $exp Then ExitLoop SetError(7, @error, 1)
+        If Not $iat Or $iat >= $exp Then ExitLoop SetError(7, @error, 1)
 
         $access_token = __googleapis_object($object, 'access_token')
         If Not $access_token Then ExitLoop SetError(8, @error, 1)
